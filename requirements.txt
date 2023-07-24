@@ -1,0 +1,15 @@
+torch>=1.9.0
+torchaudio>=0.9.0
+matplotlib>=3.4.2
+numpy>=1.21.0
+imageio[ffmpeg]
+ffmpeg-python
+tqdm
+diffusers
+transformers
+accelerate
+xformers
+Pillow
+tomesd
+demucs
+soundfile
