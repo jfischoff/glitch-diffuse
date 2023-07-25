@@ -9,11 +9,12 @@ import matplotlib.pyplot as plt
 import ffmpeg     
 from tqdm import tqdm
 from diffusers import (StableDiffusionPipeline, 
+                       EulerAncestralDiscreteScheduler,
                        StableDiffusionImg2ImgPipeline, 
                        DDIMScheduler)
 from PIL import Image
 import tomesd
-from BatchEulerAncestralDiscreteScheduler import EulerAncestralDiscreteScheduler
+# from BatchEulerAncestralDiscreteScheduler import EulerAncestralDiscreteScheduler
 
 def embed_prompt(pipe, prompt, device='cpu'):
     text_inputs = pipe.tokenizer(
@@ -46,7 +47,7 @@ def embed_prompt(pipe, prompt, device='cpu'):
    
 
 # Load the seperated audio file
-waveform, sample_rate = torchaudio.load('in-the-morning-trim.m4a')
+waveform, sample_rate = torchaudio.load('separated/htdemucs/lawyers-in-love/bass.wav')
 
 print("Waveform shape:", waveform.shape)
 print("Sample rate:", sample_rate)
@@ -59,7 +60,7 @@ print("Hop length:", hop_length)
 
 dtype = torch.float16
 if dtype == torch.float16:
-   batch_count = 50
+   batch_count = 120
 else:
    batch_count = 32
 
@@ -85,11 +86,17 @@ spectrogram = stft_transform(waveform)
 # # Take the magnitude of the spectrogram (convert from complex to real)
 spectrogram_abs = torch.abs(spectrogram)
 
+
 # Normalize the Mel spectrogram to the range 0-255
-# mel_spectrogram_norm = (mel_spectrogram_db - mel_spectrogram_db.min()) / (mel_spectrogram_db.max() - mel_spectrogram_db.min())
-mel_spectrogram_norm = torch.pow(spectrogram_abs, 3.0)
+
+# Normalize the Mel spectrogram to the range 0-255
+
+mel_spectrogram_norm = torch.pow(spectrogram_abs, 2.0 )
+
+mel_spectrogram_norm = (mel_spectrogram_norm - mel_spectrogram_norm.min()) / (mel_spectrogram_norm.max() - mel_spectrogram_norm.min())
+mel_spectrogram_norm = (mel_spectrogram_norm)
+
 # clip anything less than 0.001 to zero
-mel_spectrogram_norm = torch.clamp(mel_spectrogram_norm, min=0.001)
 print("mel_spectrogram_norm", mel_spectrogram_norm.shape)
 
 total_frames = int((waveform.shape[1] / sample_rate) * 30)
@@ -117,7 +124,11 @@ else:
   pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
 
 
-prompt="glowing lights in the dark"
+# other
+# prompt="glowing bars of light in the dark"
+# prompt="color plumes of glowing smoke in the dark"
+# prompt="glowing fireworks in the dark"
+prompt = "glowing disc of light in the dark"
 
 prompt_embeds = embed_prompt(pipe, prompt, device=device).to(dtype=dtype)
 
@@ -134,14 +145,14 @@ print("embed_means", embed_means)
 prompt_embeds = prompt_embeds.repeat(batch_count, 1, 1)
 print("prompt_embeds", prompt_embeds.shape)
 
-spectrum_multipler = 0.0000000001
+spectrum_multipler = 5.0 
 
 height = 512
 width = 512
 
 print("mel_spectrogram_norm", mel_spectrogram_norm.shape)
 
-generator = torch.Generator(device=device).manual_seed(1024)
+generator = torch.Generator(device=device).manual_seed(1025)
 
 
 initial_latents = torch.randn(1, 
@@ -153,24 +164,31 @@ initial_latents = torch.randn(1,
                               device=device).repeat(batch_count, 1, 1, 1)
 
 for f in tqdm(range(0, total_frames, batch_count)): 
-    generator = torch.Generator(device=device).manual_seed(1024)
+    generator = torch.Generator(device=device).manual_seed(1025)
 
-    all_exist = all(os.path.exists(f"{output_dir}/{f+i:08d}.png") for i in range(batch_count))
+    start_spectrogram_index = f 
+    end_spectrogram_index = min(start_spectrogram_index + batch_count, mel_spectrogram_norm.shape[2])
+    
+    actual_batch_count = end_spectrogram_index - start_spectrogram_index
+    
+
+    all_exist = all(os.path.exists(f"{output_dir}/{f+i:08d}.png") for i in range(actual_batch_count))
 
     if all_exist:
         print(f"All images for batch starting at {f:08d} exist")
         continue
     
     # convert a frame index to a spectrogram index
-    start_spectrogram_index = f 
-    end_spectrogram_index = start_spectrogram_index + batch_count 
+
+
+    generators = [torch.Generator(device=device).manual_seed(1025) for _ in range(actual_batch_count)]
 
     # get the spectrogram slice at the index
     spectrogram_slice = mel_spectrogram_norm[:, :, start_spectrogram_index:end_spectrogram_index]
 
     average_spectrogram_slice = torch.mean(spectrogram_slice, dim=0).permute(1, 0)
 
-    # average_spectrogram_slice = torch.flip(average_spectrogram_slice, [1])
+    average_spectrogram_slice = torch.flip(average_spectrogram_slice, [1])
 
     # drop the extra frequencies
     trimmed_spectrogram_slice = average_spectrogram_slice[:, :768]
@@ -184,7 +202,7 @@ for f in tqdm(range(0, total_frames, batch_count)):
 
     # expanded_spectrogram_slice[:, 11:, :] = 0.0
 
-    new_prompt_embeds = prompt_embeds + spectrum_multipler * expanded_spectrogram_slice.to(device=device, dtype=dtype)
+    new_prompt_embeds = prompt_embeds[:actual_batch_count, :, :] + spectrum_multipler * expanded_spectrogram_slice.to(device=device, dtype=dtype)
 
     # new_prompt_embeds_means = new_prompt_embeds.mean(dim=0)
     # print("expanded_spectrogram_slice_means", new_prompt_embeds.shape)
@@ -198,13 +216,13 @@ for f in tqdm(range(0, total_frames, batch_count)):
                  num_inference_steps=20,
                  height=height,
                  width=width,
-                 generator=generator,
-                 latents=initial_latents, 
+                 generator=generators,
+                 # latents=initial_latents, 
                  )[0]
 
       # save the image to a file using the frame index as the filename
       # and padding by 8 zeros
-      for i in range(batch_count):
+      for i in range(actual_batch_count):
         image[i].save(f"{output_dir}/{f+i:08d}.png")
 
 
